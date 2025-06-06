@@ -1,0 +1,9 @@
+include README.md
+include LICENSE
+include requirements.txt
+include MANIFEST.in
+
+recursive-include src/trimreads/tests *
+recursive-include src/trimreads/data *
+recursive-include docs *
+recursive-include demo *

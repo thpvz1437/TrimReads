@@ -1,0 +1,586 @@
+#!/usr/bin/env python3
+"""
+Unit tests for trimreads.py module
+"""
+
+import unittest
+import os
+import tempfile
+import gzip
+import random
+from trimreads import trimreads
+
+class TestPhredConversion(unittest.TestCase):
+    """Test Phred score conversion functions"""
+    
+    def test_phred_to_score(self):
+        """Test conversion from Phred char to quality score"""
+        self.assertEqual(trimreads.phred_to_score('!'), 0)
+        self.assertEqual(trimreads.phred_to_score('"'), 1)
+        self.assertEqual(trimreads.phred_to_score('A'), 32)
+        self.assertEqual(trimreads.phred_to_score('J'), 41)
+        self.assertEqual(trimreads.phred_to_score('~'), 93)
+    
+    def test_score_to_phred(self):
+        """Test conversion from quality score to Phred char"""
+        self.assertEqual(trimreads.score_to_phred(0), '!')
+        self.assertEqual(trimreads.score_to_phred(1), '"')
+        self.assertEqual(trimreads.score_to_phred(32), 'A')
+        self.assertEqual(trimreads.score_to_phred(41), 'J')
+        self.assertEqual(trimreads.score_to_phred(93), '~')
+    
+    def test_round_trip(self):
+        """Test round-trip conversion"""
+        for score in range(0, 94):
+            char = trimreads.score_to_phred(score)
+            converted_score = trimreads.phred_to_score(char)
+            self.assertEqual(score, converted_score)
+
+class TestBaseTrim(unittest.TestCase):
+    """Test base-by-base trimming algorithm"""
+    
+    def test_no_trimming_needed(self):
+        """Test when no trimming is needed"""
+        seq = "ATCGATCG"
+        qual = "IIIIIIII"  # Q=40 for all
+        trimmed_seq, trimmed_qual = trimreads.base_trim(seq, qual, 20)
+        self.assertEqual(trimmed_seq, seq)
+        self.assertEqual(trimmed_qual, qual)
+    
+    def test_left_trimming(self):
+        """Test left-end trimming"""
+        seq = "ATCGATCG"
+        qual = "!!!IIIII"  # Q=0,0,0,40,40,40,40,40
+        trimmed_seq, trimmed_qual = trimreads.base_trim(seq, qual, 20)
+        self.assertEqual(trimmed_seq, "CGATCG")
+        self.assertEqual(trimmed_qual, "IIIIII")
+    
+    def test_right_trimming(self):
+        """Test right-end trimming"""
+        seq = "ATCGATCG"
+        qual = "IIIII!!!"  # Q=40,40,40,40,40,0,0,0
+        trimmed_seq, trimmed_qual = trimreads.base_trim(seq, qual, 20)
+        self.assertEqual(trimmed_seq, "ATCGA")
+        self.assertEqual(trimmed_qual, "IIIII")
+    
+    def test_both_ends_trimming(self):
+        """Test trimming both ends"""
+        seq = "ATCGATCG"
+        qual = "!!IIII!!"  # Q=0,0,40,40,40,40,0,0
+        trimmed_seq, trimmed_qual = trimreads.base_trim(seq, qual, 20)
+        self.assertEqual(trimmed_seq, "CGAT")
+        self.assertEqual(trimmed_qual, "IIII")
+    
+    def test_all_low_quality(self):
+        """Test when all bases are low quality"""
+        seq = "ATCGATCG"
+        qual = "!!!!!!!!"  # Q=0 for all
+        trimmed_seq, trimmed_qual = trimreads.base_trim(seq, qual, 20)
+        self.assertEqual(trimmed_seq, "")
+        self.assertEqual(trimmed_qual, "")
+    
+    def test_threshold_exactly_met(self):
+        """Test when quality exactly meets threshold"""
+        seq = "ATCG"
+        qual = "!II!"  # Q=0,40,40,0
+        trimmed_seq, trimmed_qual = trimreads.base_trim(seq, qual, 40)
+        self.assertEqual(trimmed_seq, "TC")
+        self.assertEqual(trimmed_qual, "II")
+    
+    def test_single_base_sequence(self):
+        """Test with a single base sequence"""
+        # High quality
+        seq = "A"
+        qual = "I"  # Q=40
+        trimmed_seq, trimmed_qual = trimreads.base_trim(seq, qual, 20)
+        self.assertEqual(trimmed_seq, "A")
+        self.assertEqual(trimmed_qual, "I")
+        
+        # Low quality
+        seq = "A"
+        qual = "!"  # Q=0
+        trimmed_seq, trimmed_qual = trimreads.base_trim(seq, qual, 20)
+        self.assertEqual(trimmed_seq, "")
+        self.assertEqual(trimmed_qual, "")
+
+class TestWindowTrim(unittest.TestCase):
+    """Test window-based trimming algorithm"""
+    
+    def test_no_trimming_needed(self):
+        """Test when no trimming is needed"""
+        seq = "ATCGATCGATCG"
+        qual = "IIIIIIIIIIII"  # Q=40 for all
+        trimmed_seq, trimmed_qual = trimreads.window_trim(seq, qual, 4, 20)
+        self.assertEqual(trimmed_seq, seq)
+        self.assertEqual(trimmed_qual, qual)
+    
+    def test_left_trimming(self):
+        """Test left-end trimming"""
+        seq = "ATCGATCGATCG"
+        qual = "!!!!IIIIIIII"  # Q=0,0,0,0,40,40,40,40,40,40,40,40
+        trimmed_seq, trimmed_qual = trimreads.window_trim(seq, qual, 4, 20)
+        self.assertEqual(trimmed_seq, "ATCGATCG")
+        self.assertEqual(trimmed_qual, "IIIIIIII")
+    
+    def test_right_trimming(self):
+        """Test right-end trimming"""
+        seq = "ATCGATCGATCG"
+        qual = "IIIIIIII!!!!"  # Q=40,40,40,40,40,40,40,40,0,0,0,0
+        trimmed_seq, trimmed_qual = trimreads.window_trim(seq, qual, 4, 20)
+        self.assertEqual(trimmed_seq, "ATCGATCG")
+        self.assertEqual(trimmed_qual, "IIIIIIII")
+    
+    def test_both_ends_trimming(self):
+        """Test trimming both ends"""
+        seq = "ATCGATCGATCG"
+        qual = "!!!!IIII!!!!"  # Q=0,0,0,0,40,40,40,40,0,0,0,0
+        trimmed_seq, trimmed_qual = trimreads.window_trim(seq, qual, 4, 20)
+        self.assertEqual(trimmed_seq, "ATCG")
+        self.assertEqual(trimmed_qual, "IIII")
+    
+    def test_all_low_quality(self):
+        """Test when all windows are low quality"""
+        seq = "ATCGATCG"
+        qual = "!!!!!!!!"  # Q=0 for all
+        trimmed_seq, trimmed_qual = trimreads.window_trim(seq, qual, 4, 20)
+        self.assertEqual(trimmed_seq, "")
+        self.assertEqual(trimmed_qual, "")
+    
+    def test_window_larger_than_sequence(self):
+        """Test when window size is larger than sequence"""
+        seq = "ATCG"
+        qual = "IIII"  # Q=40 for all
+        # Should return original since window can't be applied
+        trimmed_seq, trimmed_qual = trimreads.window_trim(seq, qual, 5, 20)
+        self.assertEqual(trimmed_seq, seq)
+        self.assertEqual(trimmed_qual, qual)
+    
+    def test_exact_window_match(self):
+        """Test when window exactly meets threshold"""
+        seq = "ATCGATCG"
+        qual = "IIII!!!!"  # Q=40,40,40,40,0,0,0,0
+        # Window size 4, threshold 40
+        trimmed_seq, trimmed_qual = trimreads.window_trim(seq, qual, 4, 40)
+        self.assertEqual(trimmed_seq, "ATCG")
+        self.assertEqual(trimmed_qual, "IIII")
+    
+    def test_overlapping_windows(self):
+        """Test with overlapping windows"""
+        seq = "ATCGATCG"
+        qual = "II!IIIII"  # Q=40,40,0,40,40,40,40,40
+        # With window size 3, threshold 30
+        trimmed_seq, trimmed_qual = trimreads.window_trim(seq, qual, 3, 30)
+        # First window "II!" avg = (40+40+0)/3 ≈26.7 < 30 → trim
+        # Next window "I!I" avg = (40+0+40)/3 ≈26.7 < 30 → trim
+        # Next window "!II" avg = (0+40+40)/3 ≈26.7 < 30 → trim
+        # Next window "III" avg = 40 > 30 → keep from position 3
+        # Right side: last window "III" avg=40 > 30 → keep to end
+        self.assertEqual(trimmed_seq, "GATCG")
+        self.assertEqual(trimmed_qual, "IIIII")
+
+class TestProcessFastq(unittest.TestCase):
+    """Test processing of FASTQ files"""
+    
+    def setUp(self):
+        """Create temporary files for testing"""
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.input_file = os.path.join(self.temp_dir.name, "input.fastq")
+        self.output_file = os.path.join(self.temp_dir.name, "output.fastq")
+        
+        # Create a sample FASTQ file
+        with open(self.input_file, 'w') as f:
+            f.write("@read1\n")
+            f.write("ATCGATCGATCG\n")
+            f.write("+\n")
+            f.write("IIII!!!!IIII\n")  # Q=40,40,40,40,0,0,0,0,40,40,40,40
+            
+            f.write("@read2\n")
+            f.write("GGGGCCCC\n")
+            f.write("+\n")
+            f.write("!!!!!!!!\n")  # All Q=0
+            
+            f.write("@read3\n")
+            f.write("TTTTAAAATTTT\n")
+            f.write("+\n")
+            f.write("IIIIIIIIIIII\n")  # All Q=40
+    
+    def tearDown(self):
+        """Clean up temporary files"""
+        self.temp_dir.cleanup()
+    
+    def test_base_trimming_only(self):
+        """Test base-by-base trimming"""
+        stats = trimreads.process_fastq(
+            self.input_file,
+            self.output_file,
+            base_threshold=25,
+            min_length=5
+        )
+        
+        # Verify stats
+        self.assertEqual(stats['total_reads'], 3)
+        self.assertEqual(stats['passed_reads'], 2)
+        self.assertEqual(stats['discarded_reads'], 1)
+        
+        # Verify output file
+        with open(self.output_file, 'r') as f:
+            lines = f.readlines()
+        
+        # First read should be trimmed to "ATCGIIII" (positions 0-3 and 8-11)
+        self.assertEqual(lines[0].strip(), "@read1")
+        self.assertEqual(lines[1].strip(), "ATCGATCG")
+        self.assertEqual(lines[2].strip(), "+")
+        self.assertEqual(lines[3].strip(), "IIIIIIII")
+        
+        # Third read should be unchanged
+        self.assertEqual(lines[4].strip(), "@read3")
+        self.assertEqual(lines[5].strip(), "TTTTAAAATTTT")
+        self.assertEqual(lines[6].strip(), "+")
+        self.assertEqual(lines[7].strip(), "IIIIIIIIIIII")
+    
+    def test_window_trimming_only(self):
+        """Test window-based trimming"""
+        stats = trimreads.process_fastq(
+            self.input_file,
+            self.output_file,
+            window_size=4,
+            window_threshold=20,
+            min_length=5
+        )
+        
+        # Verify stats
+        self.assertEqual(stats['total_reads'], 3)
+        self.assertEqual(stats['passed_reads'], 2)
+        self.assertEqual(stats['discarded_reads'], 1)
+        
+        # Verify output file
+        with open(self.output_file, 'r') as f:
+            lines = f.readlines()
+        
+        # First read should be trimmed to "ATCGATCG" (positions 0-7)
+        self.assertEqual(lines[0].strip(), "@read1")
+        self.assertEqual(lines[1].strip(), "ATCGATCG")
+        self.assertEqual(lines[2].strip(), "+")
+        self.assertEqual(lines[3].strip(), "IIII!!!!")
+        
+        # Third read should be unchanged
+        self.assertEqual(lines[4].strip(), "@read3")
+        self.assertEqual(lines[5].strip(), "TTTTAAAATTTT")
+        self.assertEqual(lines[6].strip(), "+")
+        self.assertEqual(lines[7].strip(), "IIIIIIIIIIII")
+    
+    def test_combined_trimming(self):
+        """Test combined base and window trimming"""
+        stats = trimreads.process_fastq(
+            self.input_file,
+            self.output_file,
+            base_threshold=25,
+            window_size=4,
+            window_threshold=30,
+            min_length=5
+        )
+        
+        # Verify stats
+        self.assertEqual(stats['total_reads'], 3)
+        self.assertEqual(stats['passed_reads'], 2)
+        self.assertEqual(stats['discarded_reads'], 1)
+        
+        # Verify output file
+        with open(self.output_file, 'r') as f:
+            lines = f.readlines()
+        
+        # First read:
+        # Base trim: removes ends → "ATCGATCG" (positions 0-3 and 8-11)
+        # Then window trim: "ATCG" (positions 0-3) has avg Q=40 > 30 → keep
+        #                  "TCGA" (positions 1-4) avg=(40,0,0,0)=10 → trim left
+        #                  "CGAT" (positions 2-5) avg=(0,0,0,0)=0 → trim left
+        #                  ... until "ATCG" at end? Actually our window trim is bidirectional.
+        # Let's look at the algorithm: it finds the first window from left that meets threshold
+        # and the last window from right that meets threshold.
+        # After base trim: sequence="ATCGATCG", quality="IIII!!!!"
+        # Left side: first window "ATCG" with qual "IIII" → avg=40 > 30 → start_index=0
+        # Right side: scanning from right: 
+        #   last window "TCGA" with qual "I!!!" → avg=10 < 30
+        #   next window "CGAT" with qual "!!!!" → avg=0 < 30
+        #   next window "GATC" with qual "!!!!" → avg=0 < 30
+        #   next window "ATCG" with qual "!!!!" → avg=0 < 30
+        # Since no window meets threshold from right, read would be discarded?
+        # Actually, our algorithm for right side starts from the right and moves left until it finds a window
+        # that meets the threshold. If none is found, it discards the read.
+        #
+        # But in our test, after base trimming we have 8 bases. The algorithm for the right side:
+        #   Start at position 4 (windows: 4-7: "ATCG" with qual "!!!!" → avg=0 → doesn't meet
+        #   Then position 3-6: "GATC" → qual "!!!!" → avg=0
+        #   Then position 2-5: "CGAT" → qual "!!!!" → avg=0
+        #   Then position 1-4: "TCGA" → qual "I!!!" → avg=10
+        #   Then position 0-3: "ATCG" → qual "IIII" → avg=40 → meets threshold → end_index = 0+4-1=3
+        #
+        # So the final read is positions 0-3 → "ATCG"
+        self.assertEqual(lines[0].strip(), "@read1")
+        self.assertEqual(lines[1].strip(), "ATCG")
+        self.assertEqual(lines[2].strip(), "+")
+        self.assertEqual(lines[3].strip(), "IIII")
+        
+        # Third read should be unchanged
+        self.assertEqual(lines[4].strip(), "@read3")
+        self.assertEqual(lines[5].strip(), "TTTTAAAATTTT")
+        self.assertEqual(lines[6].strip(), "+")
+        self.assertEqual(lines[7].strip(), "IIIIIIIIIIII")
+    
+    def test_min_length_filter(self):
+        """Test minimum length filtering"""
+        stats = trimreads.process_fastq(
+            self.input_file,
+            self.output_file,
+            base_threshold=25,
+            min_length=10
+        )
+        
+        # Verify stats
+        self.assertEqual(stats['total_reads'], 3)
+        self.assertEqual(stats['passed_reads'], 1)  # Only read3 is long enough
+        self.assertEqual(stats['discarded_reads'], 2)
+        
+        # Verify output file contains only read3
+        with open(self.output_file, 'r') as f:
+            lines = f.readlines()
+        
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(lines[0].strip(), "@read3")
+        self.assertEqual(lines[1].strip(), "TTTTAAAATTTT")
+        self.assertEqual(lines[2].strip(), "+")
+        self.assertEqual(lines[3].strip(), "IIIIIIIIIIII")
+    
+    def test_gzip_support(self):
+        """Test gzip compressed file handling"""
+        # Create gzipped input
+        gz_input = os.path.join(self.temp_dir.name, "input.fastq.gz")
+        with gzip.open(gz_input, 'wt') as f:
+            f.write("@read1\n")
+            f.write("ATCG\n")
+            f.write("+\n")
+            f.write("IIII\n")
+        
+        # Create gzipped output path
+        gz_output = os.path.join(self.temp_dir.name, "output.fastq.gz")
+        
+        # Process
+        stats = trimreads.process_fastq(
+            gz_input,
+            gz_output,
+            min_length=1
+        )
+        
+        # Verify
+        self.assertEqual(stats['total_reads'], 1)
+        self.assertEqual(stats['passed_reads'], 1)
+        
+        # Read output
+        with gzip.open(gz_output, 'rt') as f:
+            lines = f.readlines()
+        
+        self.assertEqual(lines[0].strip(), "@read1")
+        self.assertEqual(lines[1].strip(), "ATCG")
+        self.assertEqual(lines[2].strip(), "+")
+        self.assertEqual(lines[3].strip(), "IIII")
+    
+    def test_invalid_fastq(self):
+        """Test handling of invalid FASTQ records"""
+        # Create invalid FASTQ file
+        invalid_file = os.path.join(self.temp_dir.name, "invalid.fastq")
+        with open(invalid_file, 'w') as f:
+            f.write("@read1\n")
+            f.write("ATCG\n")
+            f.write("+\n")
+            f.write("III\n")  # Length mismatch
+        
+        # Test processing
+        with self.assertLogs(level='WARNING') as cm:
+            stats = trimreads.process_fastq(
+                invalid_file,
+                self.output_file,
+                min_length=1
+            )
+        
+        # Verify warning was logged
+        self.assertTrue(any("Length mismatch" in log for log in cm.output))
+        
+        # Verify stats
+        self.assertEqual(stats['total_reads'], 1)
+        self.assertEqual(stats['passed_reads'], 0)
+        self.assertEqual(stats['discarded_reads'], 0)  # Record wasn't processed, but not counted as discarded
+    
+    def test_empty_file(self):
+        """Test processing of empty file"""
+        empty_file = os.path.join(self.temp_dir.name, "empty.fastq")
+        open(empty_file, 'w').close()  # Create empty file
+        
+        stats = trimreads.process_fastq(
+            empty_file,
+            self.output_file,
+            min_length=1
+        )
+        
+        # Verify stats
+        self.assertEqual(stats['total_reads'], 0)
+        self.assertEqual(stats['passed_reads'], 0)
+        self.assertEqual(stats['discarded_reads'], 0)
+
+class TestCommandLineInterface(unittest.TestCase):
+    """Test command-line interface"""
+    
+    def setUp(self):
+        """Create temporary files for testing"""
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.input_file = os.path.join(self.temp_dir.name, "input.fastq")
+        self.output_file = os.path.join(self.temp_dir.name, "output.fastq")
+        
+        # Create a sample FASTQ file with 100 reads
+        with open(self.input_file, 'w') as f:
+            for i in range(100):
+                seq = "A" * 100
+                # Create quality string: first 10 low, middle 80 high, last 10 low
+                qual = ("!" * 10) + ("I" * 80) + ("!" * 10)
+                f.write(f"@read{i}\n{seq}\n+\n{qual}\n")
+    
+    def tearDown(self):
+        """Clean up temporary files"""
+        self.temp_dir.cleanup()
+    
+    def test_cli_base_trimming(self):
+        """Test CLI with base trimming"""
+        # Mock command line arguments
+        sys.argv = [
+            'trimreads.py',
+            '-i', self.input_file,
+            '-o', self.output_file,
+            '--base_threshold', '25',
+            '--min_length', '50'
+        ]
+        
+        # Run the CLI
+        trimreads.main()
+        
+        # Verify output
+        with open(self.output_file, 'r') as f:
+            lines = f.readlines()
+        
+        # Should have 400 lines (100 reads * 4 lines)
+        self.assertEqual(len(lines), 400)
+        
+        # Check a sample read
+        self.assertTrue(lines[0].startswith("@read"))
+        self.assertEqual(len(lines[1].strip()), 80)  # Trimmed to middle 80 bases
+        self.assertEqual(lines[2].strip(), "+")
+        self.assertEqual(lines[3].strip(), "I" * 80)
+    
+    def test_cli_window_trimming(self):
+        """Test CLI with window trimming"""
+        # Mock command line arguments
+        sys.argv = [
+            'trimreads.py',
+            '-i', self.input_file,
+            '-o', self.output_file,
+            '--window_size', '10',
+            '--window_threshold', '25',
+            '--min_length', '50'
+        ]
+        
+        # Run the CLI
+        trimreads.main()
+        
+        # Verify output
+        with open(self.output_file, 'r') as f:
+            lines = f.readlines()
+        
+        # Should have 400 lines (100 reads * 4 lines)
+        self.assertEqual(len(lines), 400)
+        
+        # Check a sample read
+        self.assertTrue(lines[0].startswith("@read"))
+        self.assertEqual(len(lines[1].strip()), 80)  # Trimmed to middle 80 bases
+        self.assertEqual(lines[2].strip(), "+")
+        self.assertEqual(lines[3].strip(), "I" * 80)
+    
+    def test_cli_missing_arguments(self):
+        """Test CLI with missing required arguments"""
+        # Mock command line arguments
+        sys.argv = ['trimreads.py']
+        
+        # Should exit with error
+        with self.assertRaises(SystemExit):
+            trimreads.main()
+    
+    def test_cli_invalid_window_args(self):
+        """Test CLI with invalid window arguments"""
+        # Mock command line arguments
+        sys.argv = [
+            'trimreads.py',
+            '-i', self.input_file,
+            '-o', self.output_file,
+            '--window_size', '10'
+            # Missing window_threshold
+        ]
+        
+        # Should exit with error
+        with self.assertRaises(SystemExit):
+            trimreads.main()
+    
+    def test_cli_nonexistent_file(self):
+        """Test CLI with non-existent input file"""
+        # Mock command line arguments
+        sys.argv = [
+            'trimreads.py',
+            '-i', "nonexistent.fastq",
+            '-o', self.output_file
+        ]
+        
+        # Should exit with error
+        with self.assertRaises(SystemExit):
+            trimreads.main()
+
+def generate_random_quality(length, min_q=0, max_q=40):
+    """Generate random quality string"""
+    return ''.join(trimreads.score_to_phred(random.randint(min_q, max_q)) for _ in range(length))
+
+class TestPerformance(unittest.TestCase):
+    """Test performance with large files"""
+    
+    def setUp(self):
+        """Create large temporary file for testing"""
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.large_input = os.path.join(self.temp_dir.name, "large.fastq")
+        self.output_file = os.path.join(self.temp_dir.name, "output.fastq")
+        
+        # Create a large FASTQ file with 10,000 reads
+        with open(self.large_input, 'w') as f:
+            for i in range(10000):
+                seq = "ACGT" * 100  # 400 bp reads
+                qual = generate_random_quality(400, min_q=0, max_q=40)
+                f.write(f"@read{i}\n{seq}\n+\n{qual}\n")
+    
+    def tearDown(self):
+        """Clean up temporary files"""
+        self.temp_dir.cleanup()
+    
+    def test_large_file_processing(self):
+        """Test processing of large file"""
+        stats = trimreads.process_fastq(
+            self.large_input,
+            self.output_file,
+            base_threshold=20,
+            min_length=100
+        )
+        
+        # Basic sanity checks
+        self.assertEqual(stats['total_reads'], 10000)
+        self.assertGreater(stats['passed_reads'], 5000)  # Most should pass
+        self.assertLess(stats['discarded_reads'], 5000)
+        
+        # Verify output file has the expected number of records
+        with open(self.output_file, 'r') as f:
+            lines = f.readlines()
+        self.assertEqual(len(lines), stats['passed_reads'] * 4)
+
+if __name__ == '__main__':
+    unittest.main()

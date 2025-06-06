@@ -1,0 +1,16 @@
+biopython>=1.79
+numpy>=1.21
+tqdm>=4.62
+
+[dev]
+pytest>=6.2
+pytest-cov>=3.0
+flake8
+black
+twine
+sphinx
+sphinx_rtd_theme
+
+[full]
+matplotlib
+seaborn

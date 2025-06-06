@@ -1,0 +1,3 @@
+[console_scripts]
+fastq_utils = trimreads.fastq_parser:main
+trimreads = trimreads.trimreads:main
